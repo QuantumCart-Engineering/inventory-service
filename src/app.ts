@@ -2,27 +2,22 @@ import express, {
   Request,
   Response
 } from "express";
+
 import cors from "cors";
 import helmet from "helmet";
 import morgan from "morgan";
+import swaggerUi from "swagger-ui-express";
 
 import inventoryRoutes from "./routes/inventory.routes";
 import { errorHandler } from "./middleware/error.middleware";
+import { swaggerSpec } from "./docs/swagger";
 
 const app = express();
 
 app.use(helmet());
-
 app.use(cors());
-
 app.use(express.json());
-
-app.use(
-  express.urlencoded({
-    extended: true
-  })
-);
-
+app.use(express.urlencoded({ extended: true }));
 app.use(morgan("dev"));
 
 app.get(
@@ -34,6 +29,12 @@ app.get(
       status: "UP"
     });
   }
+);
+
+app.use(
+  "/api-docs",
+  swaggerUi.serve,
+  swaggerUi.setup(swaggerSpec)
 );
 
 app.use(
