@@ -20,4 +20,24 @@ router.post(
   inventoryController.createInventory
 );
 
+router.post(
+  "/reserve",
+  inventoryController.reserveInventory
+);
+
+router.post(
+  "/confirm",
+  inventoryController.confirmInventory
+);
+
+router.post(
+  "/release",
+  inventoryController.releaseInventory
+);
+
+router.get(
+  "/:productId",
+  inventoryController.getInventoryByProductId
+);
+
 export default router;

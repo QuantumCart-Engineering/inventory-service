@@ -17,13 +17,39 @@ export const errorHandler = (
       ? error.message
       : "Internal server error";
 
-  const statusCode =
+  let statusCode = 500;
+
+  if (message === "Inventory not found") {
+    statusCode = 404;
+  } else if (
+    message === "Inventory reservation not found"
+  ) {
+    statusCode = 404;
+  } else if (
+    message === "Insufficient inventory"
+  ) {
+    statusCode = 409;
+  } else if (
     message.includes("already exists")
-      ? 409
-      : message.includes("required") ||
-          message.includes("must be")
-        ? 400
-        : 500;
+  ) {
+    statusCode = 409;
+  } else if (
+    message.includes("already been released")
+  ) {
+    statusCode = 409;
+  } else if (
+    message.includes(
+      "Confirmed inventory cannot be released"
+    )
+  ) {
+    statusCode = 409;
+  } else if (
+    message.includes("required") ||
+    message.includes("must be") ||
+    message.includes("Invalid")
+  ) {
+    statusCode = 400;
+  }
 
   res.status(statusCode).json({
     success: false,
