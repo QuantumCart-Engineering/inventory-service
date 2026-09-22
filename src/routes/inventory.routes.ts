@@ -1,19 +1,32 @@
 import { Router } from "express";
 
 import { InventoryController } from "../controllers/inventory.controller";
+
+import { OutboxRepository } from "../repositories/outbox.repository";
+
 import { InventoryRepository } from "../repositories/inventory.repository";
+
 import { InventoryService } from "../services/inventory.service";
 
 const router = Router();
 
+const outboxRepository =
+  new OutboxRepository();
+
 const inventoryRepository =
-  new InventoryRepository();
+  new InventoryRepository(
+    outboxRepository
+  );
 
 const inventoryService =
-  new InventoryService(inventoryRepository);
+  new InventoryService(
+    inventoryRepository
+  );
 
 const inventoryController =
-  new InventoryController(inventoryService);
+  new InventoryController(
+    inventoryService
+  );
 
 router.post(
   "/",

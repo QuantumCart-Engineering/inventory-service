@@ -1,3 +1,5 @@
+import { randomUUID } from "crypto";
+
 import {
   ResultSetHeader,
   RowDataPacket
@@ -5,6 +7,7 @@ import {
 
 import { pool } from "../database/mysql";
 import { inventoryQueries } from "../queries/inventory.queries";
+import { OutboxRepository } from "./outbox.repository";
 
 export interface InventoryRecord extends RowDataPacket {
   id: string;
@@ -28,6 +31,10 @@ export interface InventoryReservationRecord
 }
 
 export class InventoryRepository {
+  constructor(
+    private readonly outboxRepository: OutboxRepository
+  ) { }
+
   async create(
     id: string,
     productId: string,
@@ -97,7 +104,9 @@ export class InventoryRepository {
           const inventory = inventoryRows[0];
 
           if (!inventory) {
-            throw new Error("Inventory not found");
+            throw new Error(
+              "Inventory not found"
+            );
           }
 
           await connection.commit();
@@ -134,16 +143,26 @@ export class InventoryRepository {
       const inventory = inventoryRows[0];
 
       if (!inventory) {
-        throw new Error("Inventory not found");
+        throw new Error(
+          "Inventory not found"
+        );
       }
 
-      if (inventory.available_quantity < quantity) {
-        throw new Error("Insufficient inventory");
+      if (
+        inventory.available_quantity < quantity
+      ) {
+        throw new Error(
+          "Insufficient inventory"
+        );
       }
 
       await connection.execute<ResultSetHeader>(
         inventoryQueries.updateReservedStock,
-        [quantity, quantity, productId]
+        [
+          quantity,
+          quantity,
+          productId
+        ]
       );
 
       await connection.execute<ResultSetHeader>(
@@ -154,6 +173,30 @@ export class InventoryRepository {
           orderId,
           quantity
         ]
+      );
+
+      /*
+       * Create the outbox event inside the same
+       * database transaction.
+       *
+       * Inventory update, reservation creation,
+       * and outbox event creation will either
+       * all commit or all rollback together.
+       */
+      await this.outboxRepository.create(
+        connection,
+        {
+          id: randomUUID(),
+          eventType: "inventory.reserved",
+          aggregateType: "inventory",
+          aggregateId: productId,
+          payload: {
+            reservationId,
+            productId,
+            orderId,
+            quantity
+          }
+        }
       );
 
       const [updatedInventoryRows] =
@@ -171,13 +214,14 @@ export class InventoryRepository {
         );
       }
 
-      const reservation: InventoryReservationRecord = {
-        id: reservationId,
-        product_id: productId,
-        order_id: orderId,
-        quantity,
-        status: "RESERVED"
-      } as InventoryReservationRecord;
+      const reservation: InventoryReservationRecord =
+        {
+          id: reservationId,
+          product_id: productId,
+          order_id: orderId,
+          quantity,
+          status: "RESERVED"
+        } as InventoryReservationRecord;
 
       await connection.commit();
 
@@ -217,11 +261,12 @@ export class InventoryRepository {
         );
       }
 
-      // Idempotent confirmation:
+      // Idempotent confirmation.
       // If already confirmed, return the existing
       // reservation without changing inventory again.
       if (reservation.status === "CONFIRMED") {
         await connection.commit();
+
         return reservation;
       }
 
@@ -232,7 +277,7 @@ export class InventoryRepository {
       }
 
       // Reservation is currently RESERVED.
-      // Remove it from the currently reserved stock.
+      // Remove it from currently reserved stock.
       await connection.execute<ResultSetHeader>(
         inventoryQueries.decreaseReservedStock,
         [
@@ -248,6 +293,26 @@ export class InventoryRepository {
       );
 
       reservation.status = "CONFIRMED";
+
+      /*
+       * Create the outbox event inside the same
+       * database transaction.
+       */
+      await this.outboxRepository.create(
+        connection,
+        {
+          id: randomUUID(),
+          eventType: "inventory.confirmed",
+          aggregateType: "inventory",
+          aggregateId: reservation.product_id,
+          payload: {
+            reservationId: reservation.id,
+            productId: reservation.product_id,
+            orderId: reservation.order_id,
+            quantity: reservation.quantity
+          }
+        }
+      );
 
       await connection.commit();
 
@@ -287,7 +352,7 @@ export class InventoryRepository {
         );
       }
 
-      // Idempotent release:
+      // Idempotent release.
       // If already released, return the existing
       // reservation without modifying inventory again.
       if (reservation.status === "RELEASED") {
@@ -320,7 +385,7 @@ export class InventoryRepository {
       }
 
       // Reservation is currently RESERVED.
-      // Return the reserved stock back to available stock.
+      // Return reserved stock back to available stock.
       await connection.execute<ResultSetHeader>(
         inventoryQueries.releaseReservedStock,
         [
@@ -351,6 +416,26 @@ export class InventoryRepository {
           "Inventory could not be retrieved after release"
         );
       }
+
+      /*
+       * Create the outbox event inside the same
+       * database transaction.
+       */
+      await this.outboxRepository.create(
+        connection,
+        {
+          id: randomUUID(),
+          eventType: "inventory.released",
+          aggregateType: "inventory",
+          aggregateId: reservation.product_id,
+          payload: {
+            reservationId: reservation.id,
+            productId: reservation.product_id,
+            orderId: reservation.order_id,
+            quantity: reservation.quantity
+          }
+        }
+      );
 
       await connection.commit();
 

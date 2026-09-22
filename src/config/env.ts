@@ -6,7 +6,9 @@ const requiredEnv = (name: string): string => {
   const value = process.env[name];
 
   if (value === undefined || value.trim() === "") {
-    throw new Error(`Missing required environment variable: ${name}`);
+    throw new Error(
+      `Missing required environment variable: ${name}`
+    );
   }
 
   return value;
@@ -23,7 +25,9 @@ const positiveIntegerEnv = (
       return defaultValue;
     }
 
-    throw new Error(`Missing required environment variable: ${name}`);
+    throw new Error(
+      `Missing required environment variable: ${name}`
+    );
   }
 
   const parsed = Number(value);
@@ -52,5 +56,16 @@ export const env = {
       "DB_CONNECTION_LIMIT",
       10
     )
+  },
+
+  rabbitmq: {
+    host: requiredEnv("RABBITMQ_HOST"),
+    port: positiveIntegerEnv(
+      "RABBITMQ_PORT",
+      5672
+    ),
+    user: requiredEnv("RABBITMQ_USER"),
+    password: requiredEnv("RABBITMQ_PASSWORD"),
+    exchange: requiredEnv("RABBITMQ_EXCHANGE")
   }
 };

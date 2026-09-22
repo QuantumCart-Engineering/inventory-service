@@ -1,23 +1,17 @@
 services:
   inventory-mysql:
     image: mysql:8.4
-
     container_name: quantumcart-inventory-mysql
-
     restart: unless-stopped
-
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
       MYSQL_DATABASE: ${MYSQL_DATABASE}
       MYSQL_USER: ${MYSQL_USER}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
-
     ports:
       - "${MYSQL_HOST_PORT}:3306"
-
     volumes:
       - inventory_mysql_data:/var/lib/mysql
-
     healthcheck:
       test:
         [
@@ -35,5 +29,31 @@ services:
       retries: 20
       start_period: 10s
 
+  inventory-rabbitmq:
+    image: rabbitmq:3-management
+    container_name: quantumcart-inventory-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+    ports:
+      - "${RABBITMQ_HOST_PORT}:5672"
+      - "${RABBITMQ_MANAGEMENT_PORT}:15672"
+    volumes:
+      - inventory_rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "rabbitmq-diagnostics",
+          "-q",
+          "ping"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
 volumes:
   inventory_mysql_data:
+  inventory_rabbitmq_data:
