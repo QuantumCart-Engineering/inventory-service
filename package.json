@@ -12,7 +12,8 @@
     "test:unit": "jest src/__tests__/unit",
     "test:integration": "jest src/__tests__/integration --runInBand",
     "test:coverage": "jest --coverage",
-    "migrate": "ts-node --transpile-only src/scripts/migrate.ts"
+    "migrate": "ts-node --transpile-only src/scripts/migrate.ts",
+    "migrate:test": "ts-node --transpile-only src/scripts/migrate-test.ts"
   },
   "keywords": [],
   "author": "",
