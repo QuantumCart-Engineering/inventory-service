@@ -1,0 +1,210 @@
+name: Inventory Service CI
+
+on:
+  push:
+    branches:
+      - dev
+      - uat
+      - master
+
+  pull_request:
+    branches:
+      - dev
+      - uat
+      - master
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    services:
+
+      # =========================
+      # Inventory MySQL
+      # =========================
+      inventory-mysql:
+        image: mysql:8.4
+
+        env:
+          MYSQL_ROOT_PASSWORD: ${{ secrets.DB_TEST_ROOT_PASSWORD }}
+          MYSQL_DATABASE: quantumcart_inventory_test
+          MYSQL_USER: ${{ secrets.DB_TEST_USER }}
+          MYSQL_PASSWORD: ${{ secrets.DB_TEST_PASSWORD }}
+
+        ports:
+          - 3306:3306
+
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -p$MYSQL_ROOT_PASSWORD"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+          --health-start-period=10s
+
+    steps:
+
+      # =========================
+      # Checkout Inventory Service
+      # =========================
+      - name: Checkout Inventory Service
+        uses: actions/checkout@v4
+
+      # =========================
+      # Setup Node.js
+      # =========================
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # =========================
+      # Verify GitHub Secrets
+      # =========================
+      - name: Verify test credentials
+        env:
+          DB_TEST_ROOT_PASSWORD: ${{ secrets.DB_TEST_ROOT_PASSWORD }}
+          DB_TEST_USER: ${{ secrets.DB_TEST_USER }}
+          DB_TEST_PASSWORD: ${{ secrets.DB_TEST_PASSWORD }}
+        run: |
+          missing=0
+
+          for name in DB_TEST_ROOT_PASSWORD DB_TEST_USER DB_TEST_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is missing or empty."
+              missing=1
+            fi
+          done
+
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
+          if [ "$DB_TEST_USER" = "root" ]; then
+            echo "::error::DB_TEST_USER must be a regular MySQL user, not root."
+            exit 1
+          fi
+
+          echo "Test credentials are configured."
+
+      # =========================
+      # Install dependencies
+      # =========================
+      - name: Install dependencies
+        run: npm ci
+
+      # =========================
+      # Create Inventory test environment
+      # =========================
+      - name: Create Inventory test environment
+        env:
+          DB_TEST_USER: ${{ secrets.DB_TEST_USER }}
+          DB_TEST_PASSWORD: ${{ secrets.DB_TEST_PASSWORD }}
+          DB_TEST_ROOT_PASSWORD: ${{ secrets.DB_TEST_ROOT_PASSWORD }}
+        run: |
+          {
+            echo "NODE_ENV=test"
+            echo "PORT=8005"
+            echo "DB_HOST=127.0.0.1"
+            echo "DB_PORT=3306"
+            echo "DB_USER=$DB_TEST_USER"
+            echo "DB_PASSWORD=$DB_TEST_PASSWORD"
+            echo "DB_NAME=quantumcart_inventory_test"
+            echo "DB_CONNECTION_LIMIT=10"
+            echo "MYSQL_ROOT_PASSWORD=$DB_TEST_ROOT_PASSWORD"
+            echo "RABBITMQ_HOST=127.0.0.1"
+            echo "RABBITMQ_PORT=5672"
+            echo "RABBITMQ_USER=ci_user"
+            echo "RABBITMQ_PASSWORD=ci_password"
+            echo "RABBITMQ_EXCHANGE=quantumcart.events"
+          } > .env.test
+
+      # =========================
+      # Wait for Inventory MySQL
+      # =========================
+      - name: Wait for Inventory MySQL
+        env:
+          DB_TEST_ROOT_PASSWORD: ${{ secrets.DB_TEST_ROOT_PASSWORD }}
+        run: |
+          for i in {1..30}; do
+            if mysqladmin ping \
+              -h 127.0.0.1 \
+              -P 3306 \
+              -uroot \
+              -p"$DB_TEST_ROOT_PASSWORD" \
+              --silent; then
+              echo "Inventory MySQL is ready."
+              exit 0
+            fi
+
+            echo "Waiting for Inventory MySQL..."
+            sleep 2
+          done
+
+          echo "::error::Inventory MySQL did not become ready."
+          exit 1
+
+      # =========================
+      # TypeScript check
+      # =========================
+      - name: TypeScript check
+        run: npx tsc --noEmit
+
+      # =========================
+      # Unit tests
+      # =========================
+      - name: Run unit tests
+        run: npm run test:unit
+
+      # =========================
+      # Run Inventory migrations
+      # =========================
+      - name: Run Inventory migrations
+        run: npm run migrate:test
+
+      # =========================
+      # Integration tests
+      # =========================
+      - name: Run integration tests
+        run: npm run test:integration
+
+      # =========================
+      # Coverage
+      # =========================
+      - name: Run test coverage
+        run: npm run test:coverage -- --runInBand
+
+      # =========================
+      # Build Inventory Service
+      # =========================
+      - name: Build Inventory Service
+        run: npm run build
+
+      # =========================
+      # Docker build
+      # =========================
+      - name: Build Inventory Docker image
+        run: docker build -t quantumcart-inventory-service:ci .
+
+      # =========================
+      # MySQL diagnostics on failure
+      # =========================
+      - name: Show Inventory MySQL diagnostics
+        if: failure()
+        run: |
+          echo "===== Docker containers ====="
+          docker ps -a
+
+          CONTAINER_ID=$(docker ps -aq --filter "name=inventory-mysql" | head -n 1)
+
+          if [ -n "$CONTAINER_ID" ]; then
+            echo "===== MySQL container logs ====="
+            docker logs "$CONTAINER_ID" 2>&1 || true
+
+            echo "===== MySQL health status ====="
+            docker inspect \
+              --format='{{json .State.Health}}' \
+              "$CONTAINER_ID" || true
+          else
+            echo "Inventory MySQL container was not found."
+          fi
