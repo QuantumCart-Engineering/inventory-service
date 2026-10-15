@@ -1,3 +1,4 @@
+
 services:
   inventory-mysql:
     image: mysql:8.4
@@ -28,6 +29,8 @@ services:
       timeout: 5s
       retries: 20
       start_period: 10s
+    networks:
+      - quantumcart-network
 
   inventory-rabbitmq:
     image: rabbitmq:3-management
@@ -42,17 +45,68 @@ services:
     volumes:
       - inventory_rabbitmq_data:/var/lib/rabbitmq
     healthcheck:
-      test:
-        [
-          "CMD",
-          "rabbitmq-diagnostics",
-          "-q",
-          "ping"
-        ]
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 10s
       timeout: 5s
       retries: 10
       start_period: 10s
+    networks:
+      - quantumcart-network
+
+  inventory-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: quantumcart/inventory-service:local
+    container_name: quantumcart-inventory-service
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 8005
+
+      DB_HOST: inventory-mysql
+      DB_PORT: 3306
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${DB_NAME}
+      DB_CONNECTION_LIMIT: ${DB_CONNECTION_LIMIT}
+
+      RABBITMQ_HOST: inventory-rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: ${RABBITMQ_USER}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+      RABBITMQ_EXCHANGE: ${RABBITMQ_EXCHANGE}
+
+    ports:
+      - "8005:8005"
+
+    depends_on:
+      inventory-mysql:
+        condition: service_healthy
+      inventory-rabbitmq:
+        condition: service_healthy
+
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://localhost:8005/health"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+    networks:
+      - quantumcart-network
+
+networks:
+  quantumcart-network:
+    external: true
 
 volumes:
   inventory_mysql_data:
