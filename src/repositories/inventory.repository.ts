@@ -46,6 +46,30 @@ export class InventoryRepository {
     );
   }
 
+  /**
+   * Creates inventory only when the product has no inventory row.
+   *
+   * `ON DUPLICATE KEY UPDATE id = id` makes concurrent duplicate
+   * event deliveries safe: the unique key on product_id is preserved
+   * and existing available/reserved quantities are never overwritten.
+   *
+   * Returns true when a new row was inserted, false when it already
+   * existed.
+   */
+  async createIfMissing(
+    id: string,
+    productId: string,
+    initialQuantity: number
+  ): Promise<boolean> {
+    const [result] =
+      await pool.execute<ResultSetHeader>(
+        inventoryQueries.createIfMissing,
+        [id, productId, initialQuantity]
+      );
+
+    return result.affectedRows === 1;
+  }
+
   async findByProductId(
     productId: string
   ): Promise<InventoryRecord | null> {
@@ -156,14 +180,24 @@ export class InventoryRepository {
         );
       }
 
-      await connection.execute<ResultSetHeader>(
-        inventoryQueries.updateReservedStock,
-        [
-          quantity,
-          quantity,
-          productId
-        ]
-      );
+      const [reserveUpdateResult] =
+        await connection.execute<ResultSetHeader>(
+          inventoryQueries.updateReservedStock,
+          [
+            quantity,
+            quantity,
+            productId,
+            quantity
+          ]
+        );
+
+      if (
+        reserveUpdateResult.affectedRows !== 1
+      ) {
+        throw new Error(
+          "Insufficient inventory"
+        );
+      }
 
       await connection.execute<ResultSetHeader>(
         inventoryQueries.createReservation,
@@ -249,74 +283,93 @@ export class InventoryRepository {
         await connection.execute<
           InventoryReservationRecord[]
         >(
-          inventoryQueries.findReservationByOrderIdForUpdate,
+          inventoryQueries.findReservationsByOrderIdForUpdate,
           [orderId]
         );
 
-      const reservation = reservationRows[0];
+      const reservations = reservationRows;
 
-      if (!reservation) {
+      if (reservations.length === 0) {
         throw new Error(
           "Inventory reservation not found"
         );
       }
 
-      // Idempotent confirmation.
-      // If already confirmed, return the existing
-      // reservation without changing inventory again.
-      if (reservation.status === "CONFIRMED") {
-        await connection.commit();
-
-        return reservation;
-      }
-
-      if (reservation.status === "RELEASED") {
+      if (
+        reservations.some(
+          (reservation) =>
+            reservation.status === "RELEASED"
+        )
+      ) {
         throw new Error(
           "Inventory reservation has already been released"
         );
       }
 
-      // Reservation is currently RESERVED.
-      // Remove it from currently reserved stock.
-      await connection.execute<ResultSetHeader>(
-        inventoryQueries.decreaseReservedStock,
-        [
-          reservation.quantity,
-          reservation.product_id
-        ]
-      );
-
-      // Mark reservation as permanently confirmed.
-      await connection.execute<ResultSetHeader>(
-        inventoryQueries.confirmReservation,
-        [reservation.id]
-      );
-
-      reservation.status = "CONFIRMED";
-
       /*
-       * Create the outbox event inside the same
-       * database transaction.
+       * Confirm every reservation belonging to the order, not just
+       * one. Cart orders can reserve multiple products. Reservations
+       * that are already CONFIRMED are skipped, which makes retries
+       * idempotent and prevents a second decrement of reserved stock.
        */
-      await this.outboxRepository.create(
-        connection,
-        {
-          id: randomUUID(),
-          eventType: "inventory.confirmed",
-          aggregateType: "inventory",
-          aggregateId: reservation.product_id,
-          payload: {
-            reservationId: reservation.id,
-            productId: reservation.product_id,
-            orderId: reservation.order_id,
-            quantity: reservation.quantity
-          }
+      const reservationsToConfirm = reservations
+        .filter(
+          (reservation) =>
+            reservation.status === "RESERVED"
+        )
+        .sort((left, right) =>
+          left.product_id.localeCompare(
+            right.product_id
+          )
+        );
+
+      for (const reservation of reservationsToConfirm) {
+        const [result] =
+          await connection.execute<ResultSetHeader>(
+            inventoryQueries.decreaseReservedStock,
+            [
+              reservation.quantity,
+              reservation.product_id
+            ]
+          );
+
+        if (result.affectedRows !== 1) {
+          throw new Error(
+            "Inventory reservation could not be confirmed"
+          );
         }
-      );
+
+        await connection.execute<ResultSetHeader>(
+          inventoryQueries.confirmReservation,
+          [reservation.id]
+        );
+
+        reservation.status = "CONFIRMED";
+
+        /*
+         * Create the outbox event inside the same
+         * database transaction.
+         */
+        await this.outboxRepository.create(
+          connection,
+          {
+            id: randomUUID(),
+            eventType: "inventory.confirmed",
+            aggregateType: "inventory",
+            aggregateId: reservation.product_id,
+            payload: {
+              reservationId: reservation.id,
+              productId: reservation.product_id,
+              orderId: reservation.order_id,
+              quantity: reservation.quantity
+            }
+          }
+        );
+      }
 
       await connection.commit();
 
-      return reservation;
+      return reservations[0];
     } catch (error) {
       await connection.rollback();
       throw error;
@@ -324,6 +377,7 @@ export class InventoryRepository {
       connection.release();
     }
   }
+
 
   async releaseReservation(
     orderId: string
@@ -340,73 +394,106 @@ export class InventoryRepository {
         await connection.execute<
           InventoryReservationRecord[]
         >(
-          inventoryQueries.findReservationByOrderIdForUpdate,
+          inventoryQueries.findReservationsByOrderIdForUpdate,
           [orderId]
         );
 
-      const reservation = reservationRows[0];
+      const reservations = reservationRows;
 
-      if (!reservation) {
+      if (reservations.length === 0) {
         throw new Error(
           "Inventory reservation not found"
         );
       }
 
-      // Idempotent release.
-      // If already released, return the existing
-      // reservation without modifying inventory again.
-      if (reservation.status === "RELEASED") {
-        const [inventoryRows] =
-          await connection.execute<InventoryRecord[]>(
-            inventoryQueries.findByProductId,
-            [reservation.product_id]
-          );
+      const reservationsToRelease = reservations
+        .filter(
+          (reservation) =>
+            reservation.status !== "RELEASED"
+        )
+        .sort((left, right) =>
+          left.product_id.localeCompare(
+            right.product_id
+          )
+        );
 
-        const inventory = inventoryRows[0];
+      /*
+       * Releasing twice is a no-op. This is what makes cancellation
+       * and payment-failure compensation safe to retry.
+       */
+      for (const reservation of reservationsToRelease) {
+        if (reservation.status === "RESERVED") {
+          const [result] =
+            await connection.execute<ResultSetHeader>(
+              inventoryQueries.releaseReservedStock,
+              [
+                reservation.quantity,
+                reservation.quantity,
+                reservation.product_id
+              ]
+            );
 
-        if (!inventory) {
-          throw new Error(
-            "Inventory not found"
-          );
+          if (result.affectedRows !== 1) {
+            throw new Error(
+              "Inventory reservation could not be released"
+            );
+          }
+        } else if (
+          reservation.status === "CONFIRMED"
+        ) {
+          /*
+           * Confirmed stock was already removed from available
+           * quantity and reserved quantity. Cancelling a confirmed
+           * order restores those units to available stock.
+           */
+          const [result] =
+            await connection.execute<ResultSetHeader>(
+              inventoryQueries.restoreAvailableStock,
+              [
+                reservation.quantity,
+                reservation.product_id
+              ]
+            );
+
+          if (result.affectedRows !== 1) {
+            throw new Error(
+              "Confirmed inventory could not be restored"
+            );
+          }
         }
 
-        await connection.commit();
+        await connection.execute<ResultSetHeader>(
+          inventoryQueries.releaseReservation,
+          [reservation.id]
+        );
 
-        return {
-          reservation,
-          inventory
-        };
-      }
+        reservation.status = "RELEASED";
 
-      if (reservation.status === "CONFIRMED") {
-        throw new Error(
-          "Confirmed inventory cannot be released"
+        /*
+         * Create the outbox event inside the same
+         * database transaction.
+         */
+        await this.outboxRepository.create(
+          connection,
+          {
+            id: randomUUID(),
+            eventType: "inventory.released",
+            aggregateType: "inventory",
+            aggregateId: reservation.product_id,
+            payload: {
+              reservationId: reservation.id,
+              productId: reservation.product_id,
+              orderId: reservation.order_id,
+              quantity: reservation.quantity
+            }
+          }
         );
       }
-
-      // Reservation is currently RESERVED.
-      // Return reserved stock back to available stock.
-      await connection.execute<ResultSetHeader>(
-        inventoryQueries.releaseReservedStock,
-        [
-          reservation.quantity,
-          reservation.quantity,
-          reservation.product_id
-        ]
-      );
-
-      // Mark reservation as released.
-      await connection.execute<ResultSetHeader>(
-        inventoryQueries.releaseReservation,
-        [reservation.id]
-      );
-
-      reservation.status = "RELEASED";
 
       const [inventoryRows] =
         await connection.execute<InventoryRecord[]>(
           inventoryQueries.findByProductId,
-          [reservation.product_id]
+          [reservations[0].product_id]
         );
 
       const inventory = inventoryRows[0];
@@ -417,30 +504,10 @@ export class InventoryRepository {
         );
       }
 
-      /*
-       * Create the outbox event inside the same
-       * database transaction.
-       */
-      await this.outboxRepository.create(
-        connection,
-        {
-          id: randomUUID(),
-          eventType: "inventory.released",
-          aggregateType: "inventory",
-          aggregateId: reservation.product_id,
-          payload: {
-            reservationId: reservation.id,
-            productId: reservation.product_id,
-            orderId: reservation.order_id,
-            quantity: reservation.quantity
-          }
-        }
-      );
-
       await connection.commit();
 
       return {
-        reservation,
+        reservation: reservations[0],
         inventory
       };
     } catch (error) {
@@ -450,4 +517,5 @@ export class InventoryRepository {
       connection.release();
     }
   }
+
 }

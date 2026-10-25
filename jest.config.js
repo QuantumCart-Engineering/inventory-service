@@ -28,7 +28,4 @@ module.exports = {
 
   verbose: true,
 
-  setupFiles: [
-    "<rootDir>/src/__tests__/integration/test-env.ts"
-  ]
 };

@@ -51,7 +51,11 @@ export class OutboxPublisherService {
     );
   }
 
-  private async publishPendingEvents(): Promise<void> {
+  /**
+   * Publishes one batch of pending/failed events. Exposed for tests
+   * and for callers that want deterministic flushing.
+   */
+  async publishPendingEvents(): Promise<void> {
     const events =
       await this.outboxRepository.findPendingEvents(
         this.batchSize

@@ -9,6 +9,17 @@ export const inventoryQueries = {
     VALUES (?, ?, ?, 0)
   `,
 
+  createIfMissing: `
+    INSERT INTO inventory (
+      id,
+      product_id,
+      available_quantity,
+      reserved_quantity
+    )
+    VALUES (?, ?, ?, 0)
+    ON DUPLICATE KEY UPDATE id = id
+  `,
+
   findByProductId: `
     SELECT
       id,
@@ -42,6 +53,7 @@ export const inventoryQueries = {
       available_quantity = available_quantity - ?,
       reserved_quantity = reserved_quantity + ?
     WHERE product_id = ?
+      AND available_quantity >= ?
   `,
 
   decreaseReservedStock: `
@@ -78,7 +90,7 @@ export const inventoryQueries = {
     FOR UPDATE
   `,
 
-  findReservationByOrderIdForUpdate: `
+  findReservationsByOrderIdForUpdate: `
     SELECT
       id,
       product_id,
@@ -89,7 +101,7 @@ export const inventoryQueries = {
       updated_at
     FROM inventory_reservations
     WHERE order_id = ?
-    LIMIT 1
+    ORDER BY product_id ASC
     FOR UPDATE
   `,
 
@@ -110,6 +122,13 @@ export const inventoryQueries = {
     SET
       available_quantity = available_quantity + ?,
       reserved_quantity = reserved_quantity - ?
+    WHERE product_id = ?
+  `,
+
+  restoreAvailableStock: `
+    UPDATE inventory
+    SET
+      available_quantity = available_quantity + ?
     WHERE product_id = ?
   `
 };

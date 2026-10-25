@@ -25,6 +25,7 @@ export const outboxQueries = {
       updated_at
     FROM outbox_events
     WHERE status IN ('PENDING', 'FAILED')
+      AND retry_count < 5
     ORDER BY created_at ASC
     LIMIT ?
   `,

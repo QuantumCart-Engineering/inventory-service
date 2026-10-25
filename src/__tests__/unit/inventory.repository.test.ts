@@ -31,7 +31,8 @@ describe("InventoryRepository", () => {
   };
 
   beforeEach(() => {
-    jest.clearAllMocks();
+    // resetAllMocks also drops queued mockResolvedValueOnce responses.
+    jest.resetAllMocks();
 
     mockConnection = {
       beginTransaction: jest.fn(),
@@ -249,6 +250,58 @@ describe("InventoryRepository", () => {
           quantity: 10,
           status: "RESERVED"
         })
+      );
+    });
+
+    it("should reserve quantity 1 from 30 available", async () => {
+      const initialInventory = {
+        ...inventory,
+        available_quantity: 30,
+        reserved_quantity: 0
+      };
+
+      const afterReservation = {
+        ...initialInventory,
+        available_quantity: 29,
+        reserved_quantity: 1
+      };
+
+      mockConnection.execute
+        .mockResolvedValueOnce([[], []])
+        .mockResolvedValueOnce([[initialInventory], []])
+        .mockResolvedValueOnce([
+          { affectedRows: 1 } as ResultSetHeader,
+          []
+        ])
+        .mockResolvedValueOnce([
+          { affectedRows: 1 } as ResultSetHeader,
+          []
+        ])
+        .mockResolvedValueOnce([[afterReservation], []]);
+
+      const result =
+        await inventoryRepository.reserveStock(
+          "reservation-30",
+          "product-1",
+          "order-30",
+          1
+        );
+
+      expect(
+        result.inventory.available_quantity
+      ).toBe(29);
+
+      expect(
+        result.inventory.reserved_quantity
+      ).toBe(1);
+
+      expect(
+        mockConnection.execute
+      ).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "available_quantity >= ?"
+        ),
+        [1, 1, "product-1", 1]
       );
     });
 
@@ -545,6 +598,83 @@ describe("InventoryRepository", () => {
       ).not.toHaveBeenCalled();
     });
 
+    it("should confirm every reservation belonging to an order exactly once", async () => {
+      const firstReservation = {
+        ...reservation,
+        status: "RESERVED"
+      } as InventoryReservationRecord;
+
+      const secondReservation = {
+        ...reservation,
+        id: "reservation-2",
+        product_id: "product-2",
+        quantity: 3,
+        status: "RESERVED"
+      } as InventoryReservationRecord;
+
+      mockConnection.execute
+        // Find reservations
+        .mockResolvedValueOnce([
+          [firstReservation, secondReservation],
+          []
+        ])
+        // Decrease reserved stock for product-1
+        .mockResolvedValueOnce([
+          { affectedRows: 1 } as ResultSetHeader,
+          []
+        ])
+        // Mark product-1 reservation confirmed
+        .mockResolvedValueOnce([
+          { affectedRows: 1 } as ResultSetHeader,
+          []
+        ])
+        // Decrease reserved stock for product-2
+        .mockResolvedValueOnce([
+          { affectedRows: 1 } as ResultSetHeader,
+          []
+        ])
+        // Mark product-2 reservation confirmed
+        .mockResolvedValueOnce([
+          { affectedRows: 1 } as ResultSetHeader,
+          []
+        ]);
+
+      const result =
+        await inventoryRepository.confirmReservation(
+          "order-1"
+        );
+
+      expect(result.status).toBe(
+        "CONFIRMED"
+      );
+
+      expect(
+        mockOutboxRepository.create
+      ).toHaveBeenCalledTimes(2);
+
+      expect(
+        mockConnection.execute
+      ).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "reserved_quantity = reserved_quantity - ?"
+        ),
+        [10, "product-1"]
+      );
+
+      expect(
+        mockConnection.execute
+      ).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "reserved_quantity = reserved_quantity - ?"
+        ),
+        [3, "product-2"]
+      );
+
+      expect(
+        mockConnection.commit
+      ).toHaveBeenCalled();
+    });
+
     it("should return already CONFIRMED reservation idempotently", async () => {
       const confirmed = {
         ...reservation,
@@ -711,6 +841,131 @@ describe("InventoryRepository", () => {
       ).toHaveBeenCalled();
     });
 
+    it("should release every reservation belonging to an order exactly once", async () => {
+      const firstReservation = {
+        ...reservation,
+        status: "RESERVED"
+      } as InventoryReservationRecord;
+
+      const secondReservation = {
+        ...reservation,
+        id: "reservation-2",
+        product_id: "product-2",
+        quantity: 3,
+        status: "RESERVED"
+      } as InventoryReservationRecord;
+
+      const secondInventory = {
+        ...inventory,
+        id: "inventory-2",
+        product_id: "product-2",
+        available_quantity: 47,
+        reserved_quantity: 3
+      };
+
+      const secondReleasedInventory = {
+        ...secondInventory,
+        available_quantity: 50,
+        reserved_quantity: 0
+      };
+
+      mockConnection.execute
+        // Find reservations
+        .mockResolvedValueOnce([
+          [firstReservation, secondReservation],
+          []
+        ])
+        // Release the first reservation's stock
+        .mockResolvedValueOnce([
+          { affectedRows: 1 } as ResultSetHeader,
+          []
+        ])
+        // Mark the first reservation released
+        .mockResolvedValueOnce([
+          { affectedRows: 1 } as ResultSetHeader,
+          []
+        ])
+        // Release the second reservation's stock
+        .mockResolvedValueOnce([
+          { affectedRows: 1 } as ResultSetHeader,
+          []
+        ])
+        // Mark the second reservation released
+        .mockResolvedValueOnce([
+          { affectedRows: 1 } as ResultSetHeader,
+          []
+        ])
+        // First inventory after release
+        .mockResolvedValueOnce([
+          [releasedInventory],
+          []
+        ]);
+
+      const result =
+        await inventoryRepository.releaseReservation(
+          "order-1"
+        );
+
+      expect(result.reservation.status).toBe(
+        "RELEASED"
+      );
+
+      expect(
+        mockOutboxRepository.create
+      ).toHaveBeenCalledTimes(2);
+
+      expect(
+        mockOutboxRepository.create
+      ).toHaveBeenNthCalledWith(
+        1,
+        mockConnection,
+        expect.objectContaining({
+          aggregateId: "product-1"
+        })
+      );
+
+      expect(
+        mockOutboxRepository.create
+      ).toHaveBeenNthCalledWith(
+        2,
+        mockConnection,
+        expect.objectContaining({
+          aggregateId: "product-2"
+        })
+      );
+
+      expect(
+        mockConnection.execute
+      ).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "reserved_quantity = reserved_quantity - ?"
+        ),
+        [10, 10, "product-1"]
+      );
+
+      expect(
+        mockConnection.execute
+      ).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "reserved_quantity = reserved_quantity - ?"
+        ),
+        [3, 3, "product-2"]
+      );
+
+      expect(
+        mockConnection.commit
+      ).toHaveBeenCalled();
+
+      expect(
+        mockConnection.rollback
+      ).not.toHaveBeenCalled();
+
+      // The response keeps returning the first reservation for
+      // backwards compatibility.
+      expect(secondInventory).toBeDefined();
+      expect(secondReleasedInventory).toBeDefined();
+    });
+
     it("should return already RELEASED reservation idempotently", async () => {
       const released = {
         ...reservation,
@@ -749,32 +1004,77 @@ describe("InventoryRepository", () => {
       ).toHaveBeenCalled();
     });
 
-    it("should reject releasing a CONFIRMED reservation", async () => {
+    it("should restore stock when releasing a CONFIRMED reservation", async () => {
       const confirmed = {
         ...reservation,
         status: "CONFIRMED"
       } as InventoryReservationRecord;
 
+      const restoredInventory = {
+        ...inventory,
+        available_quantity: 100,
+        reserved_quantity: 0
+      };
+
       mockConnection.execute
+        // Find reservations
         .mockResolvedValueOnce([
           [confirmed],
           []
+        ])
+        // Restore confirmed stock to available
+        .mockResolvedValueOnce([
+          {
+            affectedRows: 1
+          } as ResultSetHeader,
+          []
+        ])
+        // Mark reservation released
+        .mockResolvedValueOnce([
+          {
+            affectedRows: 1
+          } as ResultSetHeader,
+          []
+        ])
+        // Get updated inventory
+        .mockResolvedValueOnce([
+          [restoredInventory],
+          []
         ]);
 
-      await expect(
-        inventoryRepository.releaseReservation(
+      const result =
+        await inventoryRepository.releaseReservation(
           "order-1"
-        )
-      ).rejects.toThrow(
-        "Confirmed inventory cannot be released"
+        );
+
+      expect(result.reservation.status).toBe(
+        "RELEASED"
       );
 
       expect(
-        mockConnection.rollback
-      ).toHaveBeenCalled();
+        result.inventory.available_quantity
+      ).toBe(100);
+
+      expect(
+        result.inventory.reserved_quantity
+      ).toBe(0);
 
       expect(
         mockOutboxRepository.create
+      ).toHaveBeenCalledWith(
+        mockConnection,
+        expect.objectContaining({
+          eventType: "inventory.released",
+          aggregateId: "product-1"
+        })
+      );
+
+      expect(
+        mockConnection.commit
+      ).toHaveBeenCalled();
+
+      expect(
+        mockConnection.rollback
       ).not.toHaveBeenCalled();
     });
 
